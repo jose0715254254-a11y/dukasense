@@ -26,6 +26,14 @@ create_tables()
 
 
 # ==================================================
+# STOCK AND REORDER SETTINGS
+# ==================================================
+
+REORDER_LEVEL = 5
+TARGET_STOCK = 10
+
+
+# ==================================================
 # PERMANENT SETTINGS
 # ==================================================
 
@@ -136,6 +144,29 @@ def get_products():
     return products
 
 
+def add_reorder_recommendations(products):
+
+    products = products.copy()
+
+    products["recommended_order"] = (
+        TARGET_STOCK - products["quantity"]
+    ).clip(lower=0)
+
+    products["estimated_reorder_cost"] = (
+        products["recommended_order"]
+        * products["buying_price"]
+    )
+
+    products["stock_status"] = products["quantity"].apply(
+        lambda quantity:
+            "REORDER NOW"
+            if quantity <= REORDER_LEVEL
+            else "Sufficient"
+    )
+
+    return products
+
+
 # ==================================================
 # SIDEBAR
 # ==================================================
@@ -227,7 +258,11 @@ if page == "Dashboard":
 
     st.divider()
 
-    st.subheader("Stock Alerts")
+    # --------------------------------------------------
+    # STOCK ALERTS AND REORDER RECOMMENDATIONS
+    # --------------------------------------------------
+
+    st.subheader("Stock Alerts & Reorder Recommendations")
 
     if products.empty:
 
@@ -236,23 +271,72 @@ if page == "Dashboard":
     else:
 
         low_stock = products[
-            products["quantity"] <= 5
-        ]
+            products["quantity"] <= REORDER_LEVEL
+        ].copy()
 
         if low_stock.empty:
 
-            st.success("No low-stock alerts.")
+            st.success("All products have sufficient stock.")
 
         else:
 
-            st.warning("Some products have low stock.")
+            low_stock = add_reorder_recommendations(low_stock)
+
+            total_reorder_cost = low_stock[
+                "estimated_reorder_cost"
+            ].sum()
+
+            total_units_to_order = low_stock[
+                "recommended_order"
+            ].sum()
+
+            col1, col2, col3 = st.columns(3)
+
+            col1.metric(
+                "Products Running Low",
+                len(low_stock)
+            )
+
+            col2.metric(
+                "Units to Reorder",
+                f"{total_units_to_order:,.2f}"
+            )
+
+            col3.metric(
+                "Estimated Restocking Cost",
+                money(total_reorder_cost)
+            )
+
+            st.warning("Some products need restocking.")
+
+            display_alerts = low_stock[
+                [
+                    "name",
+                    "quantity",
+                    "buying_price",
+                    "recommended_order",
+                    "estimated_reorder_cost"
+                ]
+            ].rename(
+                columns={
+                    "name": "Product",
+                    "quantity": "Remaining Stock",
+                    "buying_price": "Buying Price",
+                    "recommended_order": "Recommended Order",
+                    "estimated_reorder_cost": "Estimated Reorder Cost"
+                }
+            )
 
             st.dataframe(
-                low_stock[
-                    ["name", "quantity", "selling_price"]
-                ],
+                display_alerts,
                 use_container_width=True,
                 hide_index=True
+            )
+
+            st.caption(
+                "Recommendations aim to bring each low-stock product "
+                "up to 10 units. Estimated costs use the current "
+                "average buying price."
             )
 
     st.divider()
@@ -901,12 +985,12 @@ elif page == "Stock Management":
             )
 
     # --------------------------------------------------
-    # CURRENT STOCK
+    # CURRENT STOCK AND REORDER RECOMMENDATIONS
     # --------------------------------------------------
 
     st.divider()
 
-    st.subheader("Current Stock")
+    st.subheader("Current Stock & Reorder Recommendations")
 
     products = get_products()
 
@@ -916,17 +1000,49 @@ elif page == "Stock Management":
 
     else:
 
+        stock_display = add_reorder_recommendations(products)
+
+        display_stock = stock_display.rename(
+            columns={
+                "name": "Product",
+                "quantity": "Current Quantity",
+                "buying_price": "Buying Price",
+                "selling_price": "Selling Price",
+                "stock_status": "Stock Status",
+                "recommended_order": "Recommended Order",
+                "estimated_reorder_cost": "Estimated Reorder Cost"
+            }
+        )
+
         st.dataframe(
-            products[
+            display_stock[
                 [
-                    "name",
-                    "quantity",
-                    "buying_price",
-                    "selling_price"
+                    "Product",
+                    "Current Quantity",
+                    "Buying Price",
+                    "Selling Price",
+                    "Stock Status",
+                    "Recommended Order",
+                    "Estimated Reorder Cost"
                 ]
             ],
             use_container_width=True,
             hide_index=True
+        )
+
+        total_reorder_cost = stock_display[
+            "estimated_reorder_cost"
+        ].sum()
+
+        st.metric(
+            "Total Estimated Restocking Budget",
+            money(total_reorder_cost)
+        )
+
+        st.caption(
+            "Products with 5 units or fewer are flagged for restocking. "
+            "The recommended order brings stock up to 10 units. "
+            "These are estimates, not supplier orders."
         )
 
 
