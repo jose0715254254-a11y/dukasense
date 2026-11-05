@@ -1,6 +1,7 @@
 
 import sqlite3
 import uuid
+import io
 from datetime import datetime, date
 from html import escape
 
@@ -1044,6 +1045,57 @@ elif page == "Stock Management":
             "The recommended order brings stock up to 10 units. "
             "These are estimates, not supplier orders."
         )
+
+        # --------------------------------------------------
+        # EXPORT REORDER LIST TO EXCEL
+        # --------------------------------------------------
+
+        st.divider()
+        st.subheader("Export Reorder List")
+
+        reorder_list = stock_display[
+            stock_display["recommended_order"] > 0
+        ].copy()
+
+        if reorder_list.empty:
+            st.success("No products currently need restocking.")
+        else:
+            reorder_export = reorder_list[
+                [
+                    "name",
+                    "quantity",
+                    "recommended_order",
+                    "buying_price",
+                    "estimated_reorder_cost"
+                ]
+            ].rename(
+                columns={
+                    "name": "Product",
+                    "quantity": "Current Stock",
+                    "recommended_order": "Quantity to Buy",
+                    "buying_price": "Buying Price per Unit (KSh)",
+                    "estimated_reorder_cost": "Estimated Total Cost (KSh)"
+                }
+            )
+
+            excel_buffer = io.BytesIO()
+
+            with pd.ExcelWriter(
+                excel_buffer,
+                engine="openpyxl"
+            ) as writer:
+                reorder_export.to_excel(
+                    writer,
+                    sheet_name="Reorder List",
+                    index=False
+                )
+
+            st.download_button(
+                label="Download Reorder List (Excel)",
+                data=excel_buffer.getvalue(),
+                file_name="dukasense_reorder_list.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
 
 
 # ==================================================
