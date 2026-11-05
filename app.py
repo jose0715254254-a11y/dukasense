@@ -80,6 +80,34 @@ create_settings_table()
 
 
 # ==================================================
+# STOCK CORRECTION AUDIT TABLE
+# ==================================================
+
+def create_stock_adjustments_table():
+
+    conn = connect()
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS stock_adjustments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            product_id INTEGER NOT NULL,
+            old_quantity REAL NOT NULL,
+            new_quantity REAL NOT NULL,
+            difference REAL NOT NULL,
+            reason TEXT NOT NULL,
+            date TEXT NOT NULL,
+            FOREIGN KEY (product_id) REFERENCES products(id)
+        )
+    """)
+
+    conn.commit()
+    conn.close()
+
+
+create_stock_adjustments_table()
+
+
+# ==================================================
 # SESSION STATE
 # ==================================================
 
@@ -265,9 +293,18 @@ elif page == "Stock Management":
 
     st.title("Stock Management")
 
-    tab1, tab2 = st.tabs(
-        ["Register New Product", "Restock Existing Product"]
+    tab1, tab2, tab3, tab4 = st.tabs(
+        [
+            "Register New Product",
+            "Restock Existing Product",
+            "Stock Purchase History",
+            "Stock Corrections"
+        ]
     )
+
+    # --------------------------------------------------
+    # REGISTER NEW PRODUCT
+    # --------------------------------------------------
 
     with tab1:
 
@@ -360,6 +397,8 @@ elif page == "Stock Management":
 
                     except sqlite3.IntegrityError:
 
+                        conn.rollback()
+
                         st.error(
                             "This product already exists. "
                             "Use the restock section instead."
@@ -368,6 +407,10 @@ elif page == "Stock Management":
                     finally:
 
                         conn.close()
+
+    # --------------------------------------------------
+    # RESTOCK EXISTING PRODUCT
+    # --------------------------------------------------
 
     with tab2:
 
@@ -386,7 +429,8 @@ elif page == "Stock Management":
 
             selected_name = st.selectbox(
                 "Choose product",
-                list(product_options.keys())
+                list(product_options.keys()),
+                key="restock_product"
             )
 
             selected_product = product_options[selected_name]
@@ -491,9 +535,374 @@ elif page == "Stock Management":
                             "Stock restocked successfully."
                         )
 
+                    except Exception as error:
+
+                        conn.rollback()
+                        st.error(f"Restocking failed: {error}")
+
                     finally:
 
                         conn.close()
+
+    # --------------------------------------------------
+    # STOCK PURCHASE HISTORY
+    # --------------------------------------------------
+
+    with tab3:
+
+        st.subheader("Stock Purchase History")
+
+        st.write(
+            "View every product registration and restocking transaction."
+        )
+
+        conn = connect()
+
+        purchase_history = pd.read_sql_query(
+            """
+            SELECT
+                stock_purchases.id,
+                products.name AS product_name,
+                stock_purchases.quantity,
+                stock_purchases.buying_price,
+                (
+                    stock_purchases.quantity
+                    * stock_purchases.buying_price
+                ) AS total_cost,
+                stock_purchases.date
+
+            FROM stock_purchases
+
+            JOIN products
+                ON stock_purchases.product_id = products.id
+
+            ORDER BY stock_purchases.id DESC
+            """,
+            conn
+        )
+
+        conn.close()
+
+        if purchase_history.empty:
+
+            st.info("No stock purchases have been recorded yet.")
+
+        else:
+
+            total_purchase_cost = purchase_history[
+                "total_cost"
+            ].sum()
+
+            total_units_purchased = purchase_history[
+                "quantity"
+            ].sum()
+
+            col1, col2 = st.columns(2)
+
+            col1.metric(
+                "Total Stock Purchase Cost",
+                money(total_purchase_cost)
+            )
+
+            col2.metric(
+                "Total Units Purchased",
+                f"{total_units_purchased:,.2f}"
+            )
+
+            st.divider()
+
+            display_history = purchase_history.rename(
+                columns={
+                    "product_name": "Product",
+                    "quantity": "Quantity Purchased",
+                    "buying_price": "Buying Price per Unit",
+                    "total_cost": "Total Purchase Cost",
+                    "date": "Purchase Date"
+                }
+            )
+
+            display_history = display_history.drop(
+                columns=["id"]
+            )
+
+            st.dataframe(
+                display_history,
+                use_container_width=True,
+                hide_index=True
+            )
+
+    # --------------------------------------------------
+    # STOCK CORRECTIONS
+    # --------------------------------------------------
+
+    with tab4:
+
+        st.subheader("Correct Physical Stock")
+
+        st.write(
+            "Use this section when the actual quantity in your shop "
+            "does not match the quantity recorded in DukaSense."
+        )
+
+        st.warning(
+            "Stock corrections change the current stock quantity. "
+            "They do not create a purchase or a sale."
+        )
+
+        products = get_products()
+
+        if products.empty:
+
+            st.info("Register products before making stock corrections.")
+
+        else:
+
+            product_options = {
+                row["name"]: row
+                for _, row in products.iterrows()
+            }
+
+            selected_correction_name = st.selectbox(
+                "Choose product to correct",
+                list(product_options.keys()),
+                key="correction_product"
+            )
+
+            selected_correction_product = product_options[
+                selected_correction_name
+            ]
+
+            product_id = int(selected_correction_product["id"])
+
+            current_quantity = float(
+                selected_correction_product["quantity"]
+            )
+
+            st.metric(
+                "Current Recorded Quantity",
+                f"{current_quantity:,.2f}"
+            )
+
+            with st.form("stock_correction_form"):
+
+                actual_quantity = st.number_input(
+                    "Enter actual physical quantity",
+                    min_value=0.0,
+                    value=current_quantity,
+                    step=1.0,
+                    key=f"actual_quantity_{product_id}"
+                )
+
+                correction_reason = st.selectbox(
+                    "Reason for correction",
+                    [
+                        "Physical stock count",
+                        "Damaged goods",
+                        "Expired goods",
+                        "Theft or loss",
+                        "Recording mistake",
+                        "Other"
+                    ]
+                )
+
+                additional_details = st.text_input(
+                    "Additional details (optional)"
+                )
+
+                save_correction = st.form_submit_button(
+                    "Save Stock Correction",
+                    type="primary"
+                )
+
+                if save_correction:
+
+                    old_quantity = current_quantity
+                    new_quantity = float(actual_quantity)
+
+                    difference = new_quantity - old_quantity
+
+                    reason = correction_reason
+
+                    if additional_details.strip():
+
+                        reason += ": " + additional_details.strip()
+
+                    if difference == 0:
+
+                        st.info(
+                            "The physical quantity matches the recorded "
+                            "quantity. No correction was necessary."
+                        )
+
+                    else:
+
+                        conn = connect()
+
+                        try:
+
+                            cursor = conn.cursor()
+
+                            cursor.execute(
+                                """
+                                UPDATE products
+                                SET quantity = ?
+                                WHERE id = ?
+                                """,
+                                (
+                                    new_quantity,
+                                    product_id
+                                )
+                            )
+
+                            if cursor.rowcount != 1:
+
+                                raise ValueError(
+                                    "The product could not be updated."
+                                )
+
+                            cursor.execute(
+                                """
+                                INSERT INTO stock_adjustments (
+                                    product_id,
+                                    old_quantity,
+                                    new_quantity,
+                                    difference,
+                                    reason,
+                                    date
+                                )
+                                VALUES (?, ?, ?, ?, ?, ?)
+                                """,
+                                (
+                                    product_id,
+                                    old_quantity,
+                                    new_quantity,
+                                    difference,
+                                    reason,
+                                    datetime.now().strftime(
+                                        "%Y-%m-%d %H:%M:%S"
+                                    )
+                                )
+                            )
+
+                            conn.commit()
+
+                            st.success(
+                                f"{selected_correction_name} stock "
+                                f"corrected successfully."
+                            )
+
+                            st.write(
+                                f"Previous quantity: **{old_quantity:,.2f}**"
+                            )
+
+                            st.write(
+                                f"New quantity: **{new_quantity:,.2f}**"
+                            )
+
+                            st.write(
+                                f"Difference: **{difference:+,.2f}**"
+                            )
+
+                        except Exception as error:
+
+                            conn.rollback()
+
+                            st.error(
+                                f"Stock correction failed: {error}"
+                            )
+
+                        finally:
+
+                            conn.close()
+
+        st.divider()
+
+        st.subheader("Stock Correction History")
+
+        conn = connect()
+
+        adjustment_history = pd.read_sql_query(
+            """
+            SELECT
+                stock_adjustments.id,
+                products.name AS product,
+                stock_adjustments.old_quantity,
+                stock_adjustments.new_quantity,
+                stock_adjustments.difference,
+                stock_adjustments.reason,
+                stock_adjustments.date
+
+            FROM stock_adjustments
+
+            JOIN products
+                ON stock_adjustments.product_id = products.id
+
+            ORDER BY stock_adjustments.id DESC
+            """,
+            conn
+        )
+
+        conn.close()
+
+        if adjustment_history.empty:
+
+            st.info("No stock corrections have been recorded yet.")
+
+        else:
+
+            total_corrections = len(adjustment_history)
+
+            increases = adjustment_history[
+                adjustment_history["difference"] > 0
+            ]
+
+            decreases = adjustment_history[
+                adjustment_history["difference"] < 0
+            ]
+
+            col1, col2, col3 = st.columns(3)
+
+            col1.metric(
+                "Total Corrections",
+                f"{total_corrections:,}"
+            )
+
+            col2.metric(
+                "Stock Increases",
+                f"{len(increases):,}"
+            )
+
+            col3.metric(
+                "Stock Decreases",
+                f"{len(decreases):,}"
+            )
+
+            st.divider()
+
+            display_adjustments = adjustment_history.rename(
+                columns={
+                    "product": "Product",
+                    "old_quantity": "Previous Quantity",
+                    "new_quantity": "New Quantity",
+                    "difference": "Difference",
+                    "reason": "Reason",
+                    "date": "Correction Date"
+                }
+            )
+
+            display_adjustments = display_adjustments.drop(
+                columns=["id"]
+            )
+
+            st.dataframe(
+                display_adjustments,
+                use_container_width=True,
+                hide_index=True
+            )
+
+    # --------------------------------------------------
+    # CURRENT STOCK
+    # --------------------------------------------------
 
     st.divider()
 
@@ -1490,27 +1899,37 @@ elif page == "Expenses":
 
                 conn = connect()
 
-                conn.execute(
-                    """
-                    INSERT INTO expenses
-                    (date, description, amount)
-                    VALUES (?, ?, ?)
-                    """,
-                    (
-                        datetime.now().strftime(
-                            "%Y-%m-%d %H:%M:%S"
-                        ),
-                        description.strip(),
-                        amount
+                try:
+
+                    conn.execute(
+                        """
+                        INSERT INTO expenses
+                        (date, description, amount)
+                        VALUES (?, ?, ?)
+                        """,
+                        (
+                            datetime.now().strftime(
+                                "%Y-%m-%d %H:%M:%S"
+                            ),
+                            description.strip(),
+                            amount
+                        )
                     )
-                )
 
-                conn.commit()
-                conn.close()
+                    conn.commit()
 
-                st.success("Expense recorded successfully.")
+                    st.success("Expense recorded successfully.")
 
-                st.rerun()
+                    st.rerun()
+
+                except Exception as error:
+
+                    conn.rollback()
+                    st.error(f"Expense could not be recorded: {error}")
+
+                finally:
+
+                    conn.close()
 
     st.divider()
 
@@ -1613,7 +2032,7 @@ elif page == "Backup & Restore":
 
         st.caption(
             "This backup includes your products, stock purchases, "
-            "sales, expenses and business settings."
+            "stock corrections, sales, expenses and business settings."
         )
 
     except Exception as error:
